@@ -15,13 +15,14 @@ export class GameScene extends Phaser.Scene {
     this.hasKey = false;
     this.reachedDoor = false;
     this.hudGroup = null;
+    this.isTeleporting = false;
   }
 
   create() {
-    this.cameras.main.setBackgroundColor(0xc87c1e);
-    startMusic();
-
     const level = LEVELS[this.currentLevel - 1];
+
+    this.cameras.main.setBackgroundColor(level.bgColor ?? 0xc87c1e);
+    startMusic();
 
     // Platforms
     this.platforms = this.physics.add.staticGroup();
@@ -63,6 +64,61 @@ export class GameScene extends Phaser.Scene {
       this.hasKey = true;
     }
 
+    // Bounce pads
+    if (level.bouncePads) {
+      this.bouncePads = this.physics.add.staticGroup();
+      for (const bp of level.bouncePads) {
+        const pad = this.bouncePads.create(bp.x, bp.y, 'bounce');
+        pad.body.checkCollision.down = false;
+      }
+    }
+
+    // Crumbling platforms
+    if (level.crumblingPlatforms) {
+      this.crumbleGroup = this.physics.add.staticGroup();
+      for (const cp of level.crumblingPlatforms) {
+        const tilesX = Math.ceil(cp.w / 32);
+        for (let tx = 0; tx < tilesX; tx++) {
+          const tile = this.crumbleGroup.create(cp.x + tx * 32 + 16, cp.y + 16, 'crumble');
+          tile.body.checkCollision.down = false;
+          tile.setData('crumbling', false);
+        }
+      }
+    }
+
+    // Fake platforms (visual only — no physics body)
+    if (level.fakePlatforms) {
+      for (const fp of level.fakePlatforms) {
+        const tilesX = Math.ceil(fp.w / 32);
+        for (let tx = 0; tx < tilesX; tx++) {
+          const tile = this.add.image(fp.x + tx * 32 + 16, fp.y + 16, 'platform');
+          tile.setAlpha(0.92);
+          this.tweens.add({
+            targets: tile,
+            alpha: 0.72,
+            duration: 1800,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut',
+          });
+        }
+      }
+    }
+
+    // Teleporters
+    if (level.teleporters) {
+      for (const tp of level.teleporters) {
+        const pad1 = this.physics.add.staticSprite(tp.x1, tp.y1, 'teleporter');
+        const pad2 = this.physics.add.staticSprite(tp.x2, tp.y2, 'teleporter');
+        pad1.body.setCircle(12, 4, 4);
+        pad2.body.setCircle(12, 4, 4);
+        this.tweens.add({ targets: [pad1, pad2], alpha: 0.5, duration: 1000, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+        this._telePads = this._telePads || [];
+        this._telePads.push({ sprite: pad1, tx: tp.x2, ty: tp.y2 - 20 });
+        this._telePads.push({ sprite: pad2, tx: tp.x1, ty: tp.y1 - 20 });
+      }
+    }
+
     // Player
     this.player = this.physics.add.sprite(level.spawn.x, level.spawn.y, 'player');
     this.player.setCollideWorldBounds(true);
@@ -75,6 +131,20 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.player, this.door, this.reachDoor, null, this);
     if (this.key) {
       this.physics.add.overlap(this.player, this.key, this.collectKey, null, this);
+    }
+
+    if (this.bouncePads) {
+      this.physics.add.overlap(this.player, this.bouncePads, this.hitBounce, null, this);
+    }
+
+    if (this.crumbleGroup) {
+      this.physics.add.collider(this.player, this.crumbleGroup, this.hitCrumble, null, this);
+    }
+
+    if (this._telePads) {
+      for (const tp of this._telePads) {
+        this.physics.add.overlap(this.player, tp.sprite, () => this.teleportTo(tp.tx, tp.ty), null, this);
+      }
     }
 
     // Moving platforms
@@ -133,6 +203,17 @@ export class GameScene extends Phaser.Scene {
 
     // HUD — drawn last so it's on top
     this.drawHUD();
+
+    // Level name banner
+    if (level.name) {
+      const banner = this.add.text(400, 280, level.name, {
+        fontFamily: 'monospace', fontSize: '28px', color: '#ffffff', fontStyle: 'bold',
+      }).setOrigin(0.5).setScrollFactor(0).setAlpha(0);
+      this.tweens.add({
+        targets: banner, alpha: 1, duration: 400, yoyo: true, hold: 1200,
+        onComplete: () => banner.destroy(),
+      });
+    }
   }
 
   drawHUD() {
@@ -226,6 +307,39 @@ export class GameScene extends Phaser.Scene {
 
   sfx(fn) {
     if (!this.registry.get('sfxMuted')) fn();
+  }
+
+  hitBounce(player, pad) {
+    if (player.body.velocity.y < 0) return;
+    player.setVelocityY(-650);
+    this.sfx(playJump);
+    this.tweens.add({ targets: pad, scaleY: 0.6, duration: 80, yoyo: true });
+  }
+
+  hitCrumble(player, tile) {
+    if (tile.getData('crumbling')) return;
+    tile.setData('crumbling', true);
+    this.time.delayedCall(800, () => {
+      this.tweens.add({
+        targets: tile, x: tile.x + 2, duration: 40, yoyo: true, repeat: 5,
+        onComplete: () => {
+          this.tweens.add({
+            targets: tile, alpha: 0, y: tile.y + 20, duration: 300,
+            onComplete: () => tile.destroy(),
+          });
+        },
+      });
+    });
+  }
+
+  teleportTo(x, y) {
+    if (this.isTeleporting || this.isDead) return;
+    this.isTeleporting = true;
+    this.player.setPosition(x, y);
+    this.player.setVelocity(0, 0);
+    this.sfx(playDoor);
+    this.cameras.main.flash(200, 140, 60, 220);
+    this.time.delayedCall(800, () => { this.isTeleporting = false; });
   }
 
   collectKey() {
